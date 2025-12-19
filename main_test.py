@@ -1,7 +1,6 @@
 import pytest
 
-from main import calcular_salario_liquido
-
+from main_refatorado import calcular_salario_liquido
 
 def test_salario_zero_deve_gerar_erro():
     with pytest.raises((ValueError, AssertionError)):
