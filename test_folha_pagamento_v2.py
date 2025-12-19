@@ -1,5 +1,5 @@
 import pytest
-from folha_de_pagamento_v2 import calcular_salario_liquido
+from folha_de_pagamento_v2_refatorado import calcular_salario_liquido
 
 
 # ======== VALIDAÇÕES DE ENTRADA ========
