@@ -1,102 +1,93 @@
-from __future__ import annotations
-
+from dataclasses import dataclass, field
 from decimal import Decimal, ROUND_HALF_UP
-from typing import Union, Tuple
+from typing import List, Tuple
 
-Numero = Union[int, float, Decimal]
+# Alias para clareza semântica
 Money = Decimal
 
+@dataclass(frozen=True)
+class FaixaIR:
+    """Representa uma linha da tabela progressiva de IR."""
+    limite_superior: Money
+    aliquota: Money
 
-# Regras (constantes) — centralizadas para facilitar mudança de lei/regra
-INSS_ALIQUOTA: Money = Decimal("0.08")
-INSS_TETO: Money = Decimal("500.00")
+@dataclass(frozen=True)
+class RegrasFiscais:
+    """
+    Configuração das regras fiscais.
+    Permite injeção de dependência para diferentes anos ou regimes.
+    O 'frozen=True' garante Segurança (imutabilidade).
+    """
+    inss_aliquota: Money = Decimal("0.08")
+    inss_teto: Money = Decimal("500.00")
+    vt_aliquota: Money = Decimal("0.06")
+    # Regra Python original: 5% de abatimento sobre o imposto devido por dependente
+    dep_abatimento_percentual: Money = Decimal("0.05") 
+    
+    # Tabela padrão configurada conforme exercício
+    tabela_ir: List[FaixaIR] = field(default_factory=lambda: [
+        FaixaIR(Decimal("2000.00"), Decimal("0.00")),
+        FaixaIR(Decimal("4000.00"), Decimal("0.10")),
+        FaixaIR(Decimal("Infinity"), Decimal("0.20")),
+    ])
 
-VT_ALIQUOTA: Money = Decimal("0.06")
+class CalculadoraFolha:
+    """
+    Classe pura de lógica. Não contém dados hardcoded.
+    Recebe as regras no construtor.
+    """
+    def __init__(self, regras: RegrasFiscais = RegrasFiscais()):
+        self.regras = regras
 
-DEP_ABATIMENTO_POR_DEP: Money = Decimal("0.05")  # 5% do IR por dependente
+    def calcular_liquido(self, salario_bruto: float, num_dependentes: int = 0, vale_transporte: bool = False) -> float:
+        # 1. Validação e Conversão (Sanitização)
+        bruto = self._sanitizar_entrada(salario_bruto, num_dependentes)
 
-CASAS_2: Money = Decimal("0.01")
+        # 2. Cálculos Isolados
+        desc_inss = self._calcular_inss(bruto)
+        desc_vt = self._calcular_vt(bruto, vale_transporte)
+        
+        # O IR depende do bruto para achar a faixa, e depois dos dependentes para o abatimento
+        ir_bruto = self._calcular_ir_base(bruto)
+        desc_ir = self._aplicar_abatimento_dependentes(ir_bruto, num_dependentes)
 
-# Faixas de IR (alíquota aplicada sobre o TOTAL do salário bruto)
-# (limite_superior_inclusivo, aliquota). O último limite é "infinito".
-IR_TABELA: Tuple[Tuple[Money, Money], ...] = (
-    (Decimal("2000.00"), Decimal("0.00")),
-    (Decimal("4000.00"), Decimal("0.10")),
-    (Decimal("Infinity"), Decimal("0.20")),
-)
+        # 3. Consolidação
+        liquido = bruto - desc_inss - desc_vt - desc_ir
+        return float(self._arredondar(liquido))
 
+    def _sanitizar_entrada(self, salario: float, dependentes: int) -> Money:
+        if salario <= 0:
+            raise ValueError("O salário bruto deve ser positivo.")
+        if dependentes < 0:
+            raise ValueError("O número de dependentes não pode ser negativo.")
+        return Decimal(str(salario))
 
-def calcular_salario_liquido(
-    salario_bruto: Numero,
-    num_dependentes: int = 0,
-    vale_transporte: bool = False,
-) -> float:
-    bruto = _validar_e_converter_entrada(salario_bruto, num_dependentes, vale_transporte)
+    def _calcular_inss(self, bruto: Money) -> Money:
+        calculado = bruto * self.regras.inss_aliquota
+        return min(calculado, self.regras.inss_teto)
 
-    inss = _desconto_inss(bruto)
-    ir_base = _desconto_ir_base(bruto)
-    ir_final = _aplicar_abatimento_dependentes(ir_base, num_dependentes)
-    vt = _desconto_vale_transporte(bruto, vale_transporte)
+    def _calcular_vt(self, bruto: Money, optou: bool) -> Money:
+        if not optou:
+            return Decimal("0.00")
+        return self._arredondar(bruto * self.regras.vt_aliquota)
 
-    liquido = bruto - inss - ir_final - vt
-    liquido = _arredondar_2_casas(liquido)
-    return float(liquido)
+    def _calcular_ir_base(self, bruto: Money) -> Money:
+        for faixa in self.regras.tabela_ir:
+            if bruto <= faixa.limite_superior:
+                return self._arredondar(bruto * faixa.aliquota)
+        return Decimal("0.00") # Should be unreachable due to Infinity
 
+    def _aplicar_abatimento_dependentes(self, ir_base: Money, dependentes: int) -> Money:
+        if ir_base <= 0 or dependentes == 0:
+            return ir_base
+        
+        # Lógica: 1 - (0.05 * n_dependentes)
+        fator_reducao = Decimal("1.00") - (self.regras.dep_abatimento_percentual * dependentes)
+        
+        # Segurança: Imposto não pode ser negativo (governo devendo ao funcionário)
+        fator_reducao = max(fator_reducao, Decimal("0.00"))
+        
+        return self._arredondar(ir_base * fator_reducao)
 
-def _validar_e_converter_entrada(
-    salario_bruto: Numero, num_dependentes: int, vale_transporte: bool
-) -> Money:
-    bruto = _as_decimal(salario_bruto)
-
-    if bruto <= 0:
-        raise ValueError("Salário bruto deve ser maior que zero.")
-    if num_dependentes < 0:
-        raise ValueError("Número de dependentes deve ser >= 0.")
-    if not isinstance(vale_transporte, bool):
-        raise TypeError("Indicador de vale-transporte deve ser booleano.")
-
-    return bruto
-
-
-def _desconto_inss(bruto: Money) -> Money:
-    desconto = bruto * INSS_ALIQUOTA
-    return INSS_TETO if desconto > INSS_TETO else desconto
-
-
-def _aliquota_ir(bruto: Money) -> Money:
-    # Implementação orientada a dados reduz if/else e facilita atualização de faixas
-    for limite, aliquota in IR_TABELA:
-        if bruto <= limite:
-            return aliquota
-    return Decimal("0")  # fallback defensivo
-
-
-def _desconto_ir_base(bruto: Money) -> Money:
-    return bruto * _aliquota_ir(bruto)
-
-
-def _aplicar_abatimento_dependentes(ir_base: Money, dependentes: int) -> Money:
-    if ir_base <= 0 or dependentes == 0:
-        return ir_base
-
-    # Abatimento percentual do IR, limitado para nunca ficar negativo
-    fator = Decimal("1") - (DEP_ABATIMENTO_POR_DEP * Decimal(dependentes))
-    if fator < 0:
-        fator = Decimal("0")
-
-    return ir_base * fator
-
-
-def _desconto_vale_transporte(bruto: Money, optou: bool) -> Money:
-    return bruto * VT_ALIQUOTA if optou else Decimal("0")
-
-
-def _arredondar_2_casas(valor: Money) -> Money:
-    return valor.quantize(CASAS_2, rounding=ROUND_HALF_UP)
-
-
-def _as_decimal(valor: Numero) -> Money:
-    # Segurança/robustez: bool é subclass de int, mas não é salário
-    if isinstance(valor, bool) or not isinstance(valor, (int, float, Decimal)):
-        raise TypeError("Salário bruto deve ser numérico (int, float ou Decimal).")
-    return valor if isinstance(valor, Decimal) else Decimal(str(valor))
+    def _arredondar(self, valor: Money) -> Money:
+        return valor.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)

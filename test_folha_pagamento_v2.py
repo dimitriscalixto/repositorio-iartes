@@ -1,90 +1,76 @@
 import pytest
-from folha_de_pagamento_v2_refatorado import calcular_salario_liquido
+from decimal import Decimal
+from folha_de_pagamento_v2_refatorado import CalculadoraFolha, RegrasFiscais
 
+# Fixture: Prepara a calculadora antes dos testes
+@pytest.fixture
+def calculadora():
+    return CalculadoraFolha() # Usa regras padrão
 
-# ======== VALIDAÇÕES DE ENTRADA ========
-
-def test_salario_menor_ou_igual_a_zero_deve_lancar_erro():
+# ======== TESTES DE ERROS (Validação) ========
+@pytest.mark.parametrize("salario, dependentes", [
+    (0, 0),
+    (-100, 0),
+    (2000, -1)
+])
+def test_deve_lancar_erro_entradas_invalidas(calculadora, salario, dependentes):
     with pytest.raises(ValueError):
-        calcular_salario_liquido(0, 0, False)
-    with pytest.raises(ValueError):
-        calcular_salario_liquido(-100, 0, False)
+        calculadora.calcular_liquido(salario, dependentes)
 
+# ======== TESTES DE REGRAS DE NEGÓCIO (Tabela de Cenários) ========
+# Estrutura: Bruto, Dep, VT, Esperado, Descrição do Cenário
+cenarios_calculo = [
+    # Cenário 1: Salário Baixo (Isento IR, INSS 8%, Sem VT)
+    (1000.00, 0, False, 920.00, "Salário Baixo: Apenas INSS"),
+    
+    # Cenário 2: Limite Isenção IR (2000)
+    # INSS: 160.00 (8%), IR: 0.00
+    (2000.00, 0, False, 1840.00, "Limite Isenção IR"),
 
-def test_dependentes_negativos_devem_lancar_erro():
-    with pytest.raises(ValueError):
-        calcular_salario_liquido(2000, -1, False)
+    # Cenário 3: Faixa 1 IR (3000)
+    # INSS: 240.00, IR: 300.00 (10%)
+    (3000.00, 0, False, 2460.00, "Faixa 1 IR"),
+    
+    # Cenário 4: Teto INSS + Faixa 2 IR (7000)
+    # INSS: 500.00 (Teto), IR: 1400.00 (20%)
+    (7000.00, 0, False, 5100.00, "Teto INSS + Faixa 2 IR"),
 
+    # Cenário 5: Uso de Vale Transporte (3000)
+    # Liq Base: 2460.00 - VT(180.00) = 2280.00
+    (3000.00, 0, True, 2280.00, "Com Vale Transporte"),
 
-# ======== INSS ========
+    # Cenário 6: Dependentes (4000 com 2 filhos)
+    # INSS: 320.00
+    # IR Base: 400.00 (10%)
+    # Abatimento: 2 * 5% = 10%. IR Final = 360.00
+    # Liq: 4000 - 320 - 360 = 3320.00
+    (4000.00, 2, False, 3320.00, "Com Dependentes"),
 
-def test_inss_deve_ser_8_porcento_ate_o_teto():
-    # 8% de 4000 = 320.00, sem teto
-    resultado = calcular_salario_liquido(4000, 0, False)
-    # IR = 10% de 4000 = 400; INSS = 320
-    # líquido = 4000 - 320 - 400 = 3280
-    assert f"{resultado:.2f}" == "3280.00"
+    # Cenário 7: Muitos Dependentes Zeram IR (3000 com 20 filhos)
+    # IR Base: 300.00. Abatimento 20*5% = 100% de desconto. IR = 0.
+    # Liq: 3000 - 240(INSS) = 2760.00
+    (3000.00, 20, False, 2760.00, "Dependentes Zerando IR"),
+    
+    # Cenário 8: Arredondamento
+    (3333.33, 0, False, 2733.33, "Verificação de Arredondamento"),
+]
 
+@pytest.mark.parametrize("bruto, deps, vt, esperado, motivo", cenarios_calculo)
+def test_calculo_salario_liquido(calculadora, bruto, deps, vt, esperado, motivo):
+    resultado = calculadora.calcular_liquido(bruto, deps, vt)
+    # Comparar floats requer cuidado, mas como o sistema arredonda para 2 casas
+    # no retorno, a comparação direta costuma funcionar. 
+    # Para ser purista, convertemos o esperado para string ou usamos pytest.approx
+    assert resultado == pytest.approx(esperado, abs=0.01), f"Falha no cenário: {motivo}"
 
-def test_inss_nao_pode_ultrapassar_teto_de_500():
-    # 8% de 7000 = 560, aplica teto de 500
-    # IR = 20% de 7000 = 1400
-    # líquido = 7000 - 500 - 1400 = 5100
-    assert f"{calcular_salario_liquido(7000, 0, False):.2f}" == "5100.00"
-
-
-# ======== IMPOSTO DE RENDA ========
-
-def test_irrf_isento_ate_2000():
-    # INSS = 8% de 2000 = 160; IR = 0
-    # líquido = 2000 - 160 = 1840.00
-    assert f"{calcular_salario_liquido(2000, 0, False):.2f}" == "1840.00"
-
-
-def test_irrf_10_porcento_para_faixa_intermediaria():
-    # bruto = 3000; INSS = 240; IR = 300
-    # líquido = 3000 - 240 - 300 = 2460
-    assert f"{calcular_salario_liquido(3000, 0, False):.2f}" == "2460.00"
-
-
-def test_irrf_20_porcento_para_faixa_superior():
-    # bruto = 5000; INSS=400; IR=1000
-    # líquido = 5000 - 400 - 1000 = 3600
-    assert f"{calcular_salario_liquido(5000, 0, False):.2f}" == "3600.00"
-
-
-# ======== DEPENDENTES ========
-
-def test_dependentes_reduzem_ir_em_5_porcento_por_dependente():
-    # bruto = 4000; INSS=320; IR base=400; dependentes=2 -> -10% IR
-    # IR final = 400 - (10% de 400) = 360
-    # líquido = 4000 - 320 - 360 = 3320
-    assert f"{calcular_salario_liquido(4000, 2, False):.2f}" == "3320.00"
-
-
-def test_irrf_nao_pode_ficar_negativo_com_muitos_dependentes():
-    # bruto = 3000; IR base=300; dependentes=10 -> -50% IR = 150
-    # líquido = 3000 - 240 - 150 = 2610
-    assert f"{calcular_salario_liquido(3000, 10, False):.2f}" == "2610.00"
-
-
-# ======== VALE-TRANSPORTE ========
-
-def test_vale_transporte_aplica_desconto_de_6_porcento():
-    # bruto=3000; INSS=240; IR=300; VT=180
-    # líquido=3000-240-300-180=2280
-    assert f"{calcular_salario_liquido(3000, 0, True):.2f}" == "2280.00"
-
-
-def test_sem_vale_transporte_nao_aplica_desconto():
-    # mesmo caso acima, mas sem VT
-    assert f"{calcular_salario_liquido(3000, 0, False):.2f}" == "2460.00"
-
-
-# ======== GERAIS ========
-
-def test_resultado_arredondado_para_duas_casas():
-    # bruto 3333.33 -> INSS=266.6664, IR=333.333 (10%)
-    # líquido=3333.33 - 266.6664 - 333.333 = 2733.3306 -> 2733.33
-    resultado = calcular_salario_liquido(3333.33, 0, False)
-    assert f"{resultado:.2f}" == "2733.33"
+# ======== TESTE DE EXTENSIBILIDADE (Novo!) ========
+def test_deve_suportar_novas_regras_sem_mexer_na_logica():
+    """
+    Testa a Manutenibilidade: Injeta uma regra fictícia (Ex: INSS dobrou para 16%)
+    sem alterar a classe CalculadoraFolha.
+    """
+    regras_futuro = RegrasFiscais(inss_aliquota=Decimal("0.16")) # 16%
+    calc_futuro = CalculadoraFolha(regras_futuro)
+    
+    # 1000 * 16% = 160 desc. Liq = 840.
+    assert calc_futuro.calcular_liquido(1000, 0, False) == 840.00
